@@ -1,0 +1,19 @@
+# HybridAgent defaults
+[workspace]
+dir = "workspace"                  # where last.diff lives
+ensure = true                      # create dir on demand
+
+[solver]
+# First try local Ollama coder, then escalate (your CLI handles this flow)
+ollama_models = ["qwen2.5-coder:7b-instruct", "deepseek-coder:6.7b-instruct"]
+max_tokens = 2048
+timeout_s = 60
+
+[codex]
+enabled = true                     # your escalation path
+max_tokens = 2048
+timeout_s = 90
+
+[apply]
+preview = false                    # set true to validate without writing
+commit_message = "hybrid-agent apply"
