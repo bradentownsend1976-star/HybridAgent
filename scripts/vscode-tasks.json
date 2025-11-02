@@ -1,0 +1,49 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "HybridAgent: Solve Prompt",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        "scripts/ha.sh",
+        "solve",
+        "--prompt",
+        "${input:haPrompt}"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "panel": "shared",
+        "reveal": "always"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "HybridAgent: Apply Last Diff",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        "scripts/ha.sh",
+        "apply"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "panel": "shared",
+        "reveal": "silent"
+      },
+      "problemMatcher": []
+    }
+  ],
+  "inputs": [
+    {
+      "id": "haPrompt",
+      "type": "promptString",
+      "description": "HybridAgent prompt (remember: diff-only!)",
+      "default": "Return ONLY a git-style unified diff that updates hello.py."
+    }
+  ]
+}

@@ -1,0 +1,676 @@
+from __future__ import annotations
+
+import datetime
+import json
+import subprocess
+import sys
+import textwrap
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import List, Sequence, Tuple
+
+from hybrid_agent.codex_client import codex_generate_diff
+from hybrid_agent.ollama_client import ollama_generate_diff
+
+
+@dataclass
+class SolveResult:
+    returncode: int
+    diff_text: str
+    message: str
+    source: str
+
+
+def _strip_code_fences(text: str) -> str:
+    if not text:
+        return ""
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return stripped
+
+    lines = stripped.splitlines()
+    if not lines:
+        return stripped
+
+    # remove opening fence (``` or ```diff, etc.)
+    opener = lines.pop(0).strip()
+    if not opener.startswith("```"):
+        return stripped
+
+    while lines and not lines[-1].strip():
+        lines.pop()
+
+    if lines and lines[-1].strip().startswith("```"):
+        lines.pop()
+
+    return "\n".join(lines).strip()
+
+
+def _looks_like_unified_diff(text: str) -> bool:
+    if not text:
+        return False
+    for candidate in {text, _strip_code_fences(text)}:
+        if not candidate:
+            continue
+        if _matches_diff_structure(candidate):
+            return True
+    return False
+
+
+def _matches_diff_structure(text: str) -> bool:
+    lines = text.splitlines()
+    if not lines:
+        return False
+
+    has_diff_git = any(line.startswith("diff --git ") for line in lines)
+    has_index = any(line.startswith("Index: ") for line in lines)
+    has_context_header = any(line.startswith("*** ") for line in lines)
+    has_header = any(line.startswith("--- ") for line in lines) and any(
+        line.startswith("+++ ") for line in lines
+    )
+    has_hunk = any(line.startswith("@@") for line in lines)
+
+    minus_lines = [line for line in lines if line.startswith("-") and not line.startswith("---")]
+    plus_lines = [line for line in lines if line.startswith("+") and not line.startswith("+++")]
+
+    if has_diff_git and (minus_lines or plus_lines):
+        return True
+    if has_header and minus_lines and plus_lines:
+        return True
+    if has_hunk and (minus_lines or plus_lines):
+        return True
+    if has_index and has_context_header:
+        return True
+    return False
+
+
+def _write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
+def _write_last_diff(workspace_dir: str | Path, diff_text: str) -> None:
+    _write_text(Path(workspace_dir) / "last.diff", diff_text)
+
+
+def _sanitize_tag(value: str) -> str:
+    return "".join(c if c.isalnum() or c in ("-", "_") else "-" for c in value)
+
+
+def _archive_diff(
+    workspace_dir: str | Path,
+    diff_text: str,
+    source: str,
+    max_entries: int | None = None,
+) -> None:
+    timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%S")
+    source_tag = _sanitize_tag(source or "diff")
+    archive_dir = Path(workspace_dir) / "diffs"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+
+    candidate = archive_dir / f"{timestamp}_{source_tag}.diff"
+    counter = 1
+    while candidate.exists():
+        candidate = archive_dir / f"{timestamp}_{source_tag}_{counter}.diff"
+        counter += 1
+    _write_text(candidate, diff_text)
+    if isinstance(max_entries, int) and max_entries > 0:
+        _prune_archive(archive_dir, max_entries)
+
+
+def _prune_archive(archive_dir: Path, max_entries: int) -> None:
+    diff_files = sorted(archive_dir.glob("*.diff"))
+    if len(diff_files) <= max_entries:
+        return
+    for old_path in diff_files[:-max_entries]:
+        try:
+            old_path.unlink()
+        except Exception:
+            pass
+
+
+def _cache_paths(cache_dir: Path, cache_key: str) -> tuple[Path, Path]:
+    base = cache_dir / cache_key
+    return base.with_suffix(".diff"), base.with_suffix(".json")
+
+
+def _load_cached_diff(cache_dir: Path, cache_key: str) -> tuple[str, dict] | None:
+    diff_path, meta_path = _cache_paths(cache_dir, cache_key)
+    try:
+        diff_text = diff_path.read_text(encoding="utf-8")
+        metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except json.JSONDecodeError:
+        return None
+    return diff_text, metadata
+
+
+def _store_cached_diff(
+    cache_dir: Path,
+    cache_key: str,
+    diff_text: str,
+    metadata: dict,
+    max_entries: int | None = None,
+) -> None:
+    diff_path, meta_path = _cache_paths(cache_dir, cache_key)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    diff_path.write_text(diff_text, encoding="utf-8")
+    meta_path.write_text(json.dumps(metadata, ensure_ascii=False), encoding="utf-8")
+    if isinstance(max_entries, int) and max_entries > 0:
+        _prune_cache(cache_dir, max_entries)
+
+
+def _prune_cache(cache_dir: Path, max_entries: int) -> None:
+    try:
+        diff_files = sorted(cache_dir.glob("*.diff"), key=lambda path: path.stat().st_mtime)
+    except Exception:
+        diff_files = sorted(cache_dir.glob("*.diff"))
+    if len(diff_files) <= max_entries:
+        return
+    for old_diff in diff_files[:-max_entries]:
+        try:
+            old_diff.unlink()
+        except Exception:
+            pass
+        meta = old_diff.with_suffix(".json")
+        try:
+            meta.unlink()
+        except Exception:
+            pass
+
+
+def _compute_backoff_delay(
+    initial: float,
+    multiplier: float,
+    attempt_index: int,
+    cap: float,
+) -> float:
+    """
+    Compute exponential backoff delay.
+    attempt_index is zero-based (0 -> no wait).
+    """
+    if attempt_index <= 0:
+        return 0.0
+    delay = max(initial, 0.0) * (max(multiplier, 1.0) ** (attempt_index - 1))
+    if cap > 0:
+        delay = min(delay, cap)
+    return max(delay, 0.0)
+
+
+def _run_diff_validator(
+    diff_text: str,
+    root_dir: Path | None,
+    attempts: list[dict],
+) -> tuple[bool, str]:
+    if root_dir is None:
+        return True, diff_text
+
+    validator = root_dir / "config" / "validate_diff.py"
+    if not validator.exists():
+        return True, diff_text
+
+    record = {
+        "backend": "validator",
+        "attempt": 1,
+        "ok": False,
+    }
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(validator)],
+            input=diff_text,
+            text=True,
+            capture_output=True,
+            cwd=str(root_dir),
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        message = f"[ERR] Validator failed to execute: {exc}"
+        record["message"] = message
+        attempts.append(record)
+        return False, message
+
+    record["ok"] = proc.returncode == 0
+    record["message"] = proc.stderr.strip() if proc.stderr else ""
+    attempts.append(record)
+
+    if proc.returncode != 0:
+        msg = proc.stderr.strip() or proc.stdout.strip() or "[ERR] Diff rejected by validator."
+        return False, msg
+
+    new_diff = proc.stdout.strip()
+    return True, (new_diff or diff_text)
+
+
+def _read_files_for_context(
+    files: List[str],
+    virtual: Sequence[Tuple[str, str]] | None = None,
+) -> str:
+    parts: list[str] = []
+    for f in files:
+        p = Path(f)
+        if p.exists() and p.is_file():
+            contents = p.read_text(encoding="utf-8", errors="replace")
+            parts.append(f"\n===== FILE: {p} =====\n{contents}\n")
+        else:
+            parts.append(f"\n===== FILE: {p} (missing) =====\n")
+    if virtual:
+        for label, content in virtual:
+            parts.append(f"\n===== VIRTUAL: {label} =====\n{content}\n")
+    return "".join(parts)
+
+
+def _first_basename(files: List[str], virtual_label: str | None = None) -> str | None:
+    for f in files:
+        b = Path(f).name
+        if b:
+            return b
+    return virtual_label
+
+
+def _extract_hunk_lines(lines: list[str]) -> list[str]:
+    """Return the first contiguous region that has both '-' and '+' signs."""
+    keep: list[str] = []
+    best: list[str] = []
+    saw_minus = False
+    saw_plus = False
+
+    def flush() -> None:
+        nonlocal keep, best, saw_minus, saw_plus
+        if saw_minus and saw_plus and not best:
+            best = keep[:]
+        keep = []
+        saw_minus = False
+        saw_plus = False
+
+    for raw in lines + [""]:
+        line = raw.rstrip("\n")
+        if line.startswith((" ", "-", "+", "@@")):
+            if line.startswith("\\"):  # drop "\ No newline..." noise
+                continue
+            keep.append(line)
+            if line.startswith("-"):
+                saw_minus = True
+            if line.startswith("+"):
+                saw_plus = True
+        else:
+            flush()
+    return best
+
+
+def _section_for_file(text: str, basename: str) -> list[str] | None:
+    """Return lines within the first diff section that mentions the basename."""
+    lines = text.splitlines()
+    in_sec = False
+    buf: list[str] = []
+    for i, line in enumerate(lines):
+        if line.startswith("diff --git "):
+            # new section starts
+            if in_sec and buf:
+                return buf
+            in_sec = basename in line
+            buf = [line] if in_sec else []
+            continue
+        if (line.startswith(f"--- a/{basename}") or line.startswith(f"+++ b/{basename}")):
+            if not in_sec:
+                # start a synthetic section for this file
+                in_sec = True
+                buf = []
+        if in_sec:
+            buf.append(line)
+    return buf if in_sec and buf else None
+
+
+def _candidate_sign_lines(lines: list[str]) -> tuple[list[str], list[str]]:
+    """Return (minus_lines, plus_lines) excluding headers."""
+    minus: list[str] = []
+    plus: list[str] = []
+    for line in lines:
+        if line.startswith("--- ") or line.startswith("+++ "):
+            continue
+        if line.startswith("-"):
+            minus.append(line)
+        elif line.startswith("+"):
+            plus.append(line)
+    return minus, plus
+
+
+def _coerce_unified(
+    text: str,
+    target_basename: str | None,
+    target_file: Path | None,
+) -> str | None:
+    """
+    Coerce arbitrary diff-like text into a minimal git-unified diff.
+
+    Steps:
+    1. Prefer a section mentioning the basename.
+    2. Otherwise use the first global hunk or synthesize from +/- signs.
+    3. Ensure headers and at least one @@ hunk (fabricate if needed).
+    """
+    if not text:
+        return None
+    t = _strip_code_fences(text)
+
+    fname = target_basename or (target_file.name if target_file else "patch.txt")
+
+    # 1) Try section for this file
+    sec = _section_for_file(t, fname) if target_basename else None
+    if sec:
+        hunk = _extract_hunk_lines(sec)
+        if hunk:
+            if not any(line.startswith("@@") for line in hunk):
+                hunk.insert(0, "@@ -1 +1 @@")
+            header = [f"--- a/{fname}", f"+++ b/{fname}"]
+            return "\n".join(header + hunk) + "\n"
+
+    # 2) Global fallback
+    lines = t.splitlines()
+    hunk = _extract_hunk_lines(lines)
+
+    # If we still don't have a proper hunk, try to synthesize from signs and on-disk content
+    if not hunk:
+        minus_all, plus_all = _candidate_sign_lines(lines)
+        minus = minus_all[0] if minus_all else None
+        plus = plus_all[0] if plus_all else None
+        old_line = minus[1:] if minus and not minus.startswith("---") else None
+        new_line = plus[1:] if plus and not plus.startswith("+++") else None
+
+        # If only a '+' is present and file is single-line, replace that line.
+        if new_line and target_file and target_file.is_file():
+            try:
+                src = target_file.read_text(encoding="utf-8", errors="replace").splitlines()
+            except Exception:
+                src = []
+            if len(src) == 1:
+                old_line = src[0]
+            if old_line is not None:
+                return "\n".join([
+                    f"--- a/{fname}",
+                    f"+++ b/{fname}",
+                    "@@ -1 +1 @@",
+                    f"-{old_line}",
+                    f"+{new_line}",
+                    ""
+                ])
+
+        # If both old and new lines exist, craft a one-line hunk.
+        if old_line is not None and new_line is not None:
+            return "\n".join([
+                f"--- a/{fname}",
+                f"+++ b/{fname}",
+                "@@ -1 +1 @@",
+                f"-{old_line}",
+                f"+{new_line}",
+                ""
+            ])
+        return None
+
+    # Ensure an @@ header
+    if not any(line.startswith("@@") for line in hunk):
+        hunk.insert(0, "@@ -1 +1 @@")
+
+    header = [f"--- a/{fname}", f"+++ b/{fname}"]
+    return "\n".join(header + hunk) + "\n"
+
+
+DEFAULT_PREAMBLE = textwrap.dedent(
+    """
+    You are a coding assistant. Return ONLY a git-style unified diff.
+    Do not add commentary or wrap the response in code fences.
+
+    REQUIREMENTS:
+    - Use POSIX paths.
+    - Include matching --- and +++ headers.
+    - Include at least one @@ hunk with changes.
+    """
+).strip()
+
+
+def _build_prompt(user_prompt: str, context: str, extra_preamble: str | None) -> str:
+    sections: list[str] = []
+    preamble = DEFAULT_PREAMBLE
+    if extra_preamble:
+        extra = extra_preamble.strip()
+        if extra:
+            preamble = f"{preamble}\n\nAdditional guardrails:\n{extra}"
+    sections.append(preamble)
+    sections.append(f"Prompt from user:\n{user_prompt.strip()}")
+    if context.strip():
+        sections.append(f"Context files (read-only):\n{context.strip()}")
+    return "\n\n".join(sections).strip()
+
+
+def _append_run_log(
+    log_path: Path,
+    *,
+    prompt: str,
+    files: List[str],
+    virtual_context: Sequence[Tuple[str, str]],
+    result: SolveResult,
+    attempts: Sequence[dict],
+    ollama_model: str,
+    codex_models: str,
+) -> None:
+    entry = {
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "prompt_chars": len(prompt),
+        "files": files,
+        "virtual_files": [label for label, _ in virtual_context],
+        "returncode": result.returncode,
+        "message": result.message,
+        "source": result.source,
+        "ollama_model": ollama_model,
+        "codex_models": codex_models,
+        "attempts": attempts,
+    }
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        # Logging must never interrupt the main flow.
+        pass
+
+
+def solve_request(
+    prompt: str,
+    files: List[str],
+    max_ollama_attempts: int,
+    ollama_model: str,
+    codex_models: str,
+    workspace_dir: str,
+    *,
+    stdin_text: str | None = None,
+    stdin_label: str = "stdin.txt",
+    preamble: str | None = None,
+    log_file: str | Path | None = None,
+    root_dir: str | Path | None = None,
+    cache_dir: str | Path | None = None,
+    cache_key: str | None = None,
+    cache_metadata: dict | None = None,
+    plan_only: bool = False,
+    ollama_backoff_initial: float = 0.25,
+    ollama_backoff_multiplier: float = 2.0,
+    ollama_backoff_max: float = 5.0,
+    codex_backoff_initial: float = 0.5,
+    codex_backoff_multiplier: float = 2.0,
+    codex_backoff_max: float = 5.0,
+    archive_max_entries: int | None = None,
+    cache_max_entries: int | None = None,
+) -> SolveResult:
+    ws = Path(workspace_dir)
+    ws.mkdir(parents=True, exist_ok=True)
+    root_path = Path(root_dir).resolve() if root_dir else ws.parent.resolve()
+    cache_path = Path(cache_dir).resolve() if cache_dir else None
+
+    virtual_context: list[Tuple[str, str]] = []
+    if stdin_text:
+        virtual_context.append((stdin_label, stdin_text))
+
+    context = _read_files_for_context(files, virtual_context)
+    first_virtual = virtual_context[0][0] if virtual_context else None
+    target = _first_basename(files, first_virtual) or "target.txt"
+    target_path = None
+    if files:
+        candidate = Path(files[0]).resolve()
+        if candidate.exists():
+            target_path = candidate
+
+    full_prompt = _build_prompt(prompt, context, preamble)
+    if plan_only:
+        count_virtual = len(virtual_context)
+        plan_message = (
+            f"[PLAN] Prompt ready with {len(files)} context file(s)"
+            + (f" and {count_virtual} virtual input(s)." if count_virtual else ".")
+        )
+        return SolveResult(0, full_prompt, plan_message, "plan")
+
+    log_path = Path(log_file) if log_file else ws / "run_log.jsonl"
+    attempts: list[dict] = []
+    last_message = ""
+    ollama_failures = 0
+
+    def finalize(result: SolveResult) -> SolveResult:
+        _append_run_log(
+            log_path,
+            prompt=prompt,
+            files=files,
+            virtual_context=virtual_context,
+            result=result,
+            attempts=attempts,
+            ollama_model=ollama_model,
+            codex_models=codex_models,
+        )
+        return result
+
+    if cache_path and cache_key:
+        cached = _load_cached_diff(cache_path, cache_key)
+        if cached:
+            diff_text, metadata = cached
+            origin = metadata.get("origin", metadata.get("source", "cache"))
+            cached_message = metadata.get("message", "[OK] Diff from cache")
+            display_message = f"{cached_message} [cached]"
+            record = {
+                "backend": "cache",
+                "attempt": 1,
+                "ok": True,
+                "message": f"{display_message} (origin {origin})",
+                "diff_detected": True,
+                "coerced": False,
+            }
+            attempts.append(record)
+            _write_last_diff(ws, diff_text)
+            _archive_diff(ws, diff_text, metadata.get("source", "cache"), archive_max_entries)
+            cached_result = SolveResult(
+                0,
+                diff_text,
+                display_message,
+                "cache",
+            )
+            return finalize(cached_result)
+
+    def handle_success(diff_text: str, message: str, source: str) -> SolveResult:
+        ok, payload = _run_diff_validator(diff_text, root_path, attempts)
+        if not ok:
+            validation_result = SolveResult(3, "", payload, "validator")
+            return finalize(validation_result)
+        _write_last_diff(ws, payload)
+        _archive_diff(ws, payload, source, archive_max_entries)
+        if cache_path and cache_key:
+            metadata = dict(cache_metadata or {})
+            metadata.update(
+                {
+                    "message": message,
+                    "origin": source,
+                    "source": source,
+                    "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                }
+            )
+            _store_cached_diff(cache_path, cache_key, payload, metadata, cache_max_entries)
+        return finalize(SolveResult(0, payload, message, source))
+
+    # 1) Try Ollama up to N times
+    for attempt_index in range(max(0, max_ollama_attempts)):
+        if attempt_index > 0:
+            delay = _compute_backoff_delay(
+                ollama_backoff_initial,
+                ollama_backoff_multiplier,
+                attempt_index,
+                ollama_backoff_max,
+            )
+            if delay > 0:
+                time.sleep(delay)
+        ok, text, msg = ollama_generate_diff(model=ollama_model, prompt=full_prompt, timeout_s=25)
+        raw_text = text if isinstance(text, str) else ""
+        _write_text(ws / f"ollama_raw_{attempt_index + 1}.txt", raw_text)
+        normalized = _strip_code_fences(raw_text)
+        record = {
+            "backend": "ollama",
+            "attempt": attempt_index + 1,
+            "ok": bool(ok),
+            "message": msg,
+            "diff_detected": False,
+            "coerced": False,
+        }
+        if ok and _looks_like_unified_diff(normalized):
+            record["diff_detected"] = True
+            attempts.append(record)
+            return handle_success(normalized, "[OK] Diff from Ollama", "ollama")
+        coerced = _coerce_unified(normalized, target, target_path)
+        if ok and coerced and _looks_like_unified_diff(coerced):
+            record["coerced"] = True
+            attempts.append(record)
+            return handle_success(coerced, "[OK] Coerced diff from Ollama", "ollama-coerced")
+        attempts.append(record)
+        last_message = msg or "[ERR] Ollama did not return a valid diff."
+        ollama_failures += 1
+
+    # 2) Escalate to CodexCLI
+    if ollama_failures:
+        delay = _compute_backoff_delay(
+            codex_backoff_initial,
+            codex_backoff_multiplier,
+            ollama_failures,
+            codex_backoff_max,
+        )
+        if delay > 0:
+            time.sleep(delay)
+    ok, text, msg = codex_generate_diff(
+        models=codex_models,
+        prompt=full_prompt,
+        files=files,
+        timeout_s=60,
+    )
+    raw_text = text if isinstance(text, str) else ""
+    _write_text(ws / "codex_raw.txt", raw_text)
+    normalized = _strip_code_fences(raw_text)
+    record = {
+        "backend": "codex-cli",
+        "attempt": 1,
+        "ok": bool(ok),
+        "message": msg,
+        "diff_detected": False,
+        "coerced": False,
+    }
+    if ok and _looks_like_unified_diff(normalized):
+        record["diff_detected"] = True
+        attempts.append(record)
+        return handle_success(normalized, "[OK] Diff from CodexCLI", "codex")
+    coerced = _coerce_unified(normalized, target, target_path)
+    if ok and coerced and _looks_like_unified_diff(coerced):
+        record["coerced"] = True
+        attempts.append(record)
+        return handle_success(coerced, "[OK] Coerced diff from CodexCLI", "codex-coerced")
+    if ok and not _looks_like_unified_diff(normalized):
+        msg = "[ERR] CodexCLI did not produce a recognizable diff format."
+    last_message = msg or last_message
+    attempts.append(record)
+
+    result = SolveResult(
+        2,
+        "",
+        msg or last_message or "[ERR] Neither Ollama nor Codex produced a valid unified diff.",
+        "none",
+    )
+    return finalize(result)
