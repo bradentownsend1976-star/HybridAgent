@@ -29,6 +29,7 @@ ha = "hybrid_agent.cli:main"
 dev = [
     "pytest>=8",
     "ruff>=0.14",
+    "tomli-w>=1.0.0",
     "tomli>=2",
 ]
 
