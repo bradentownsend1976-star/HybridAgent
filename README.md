@@ -28,6 +28,26 @@ Use `--apply-mode ask` to review the diff interactively, or `--apply-mode never`
 make run
 make solve P='Return ONLY a unified diff…' F='--file hello.py'
 make test
+make lint
+make typecheck
+make security
+make audit
+make hooks    # calls tools/post_hooks.sh run
+make ci       # runs lint + typecheck + security + audit + test
+```
+
+`nox` mirrors the same workflow in isolated virtualenvs:
+
+```bash
+nox -s lint typecheck tests
+nox -s security audit
+```
+
+Install the curated git hooks:
+
+```bash
+pip install pre-commit
+pre-commit install --install-hooks
 ```
 
 ## Prompt Guardrails
@@ -73,7 +93,6 @@ log_file = "workspace/run_log.jsonl"
 apply_by_default = false
 apply_preview = true
 json_output = false
-context_globs = ["docs/**/*.md"]
 infer_related_files = true
 apply_mode = "ask"
 apply_branch = "hybridagent/update"
@@ -81,7 +100,15 @@ commit_message = "Apply HybridAgent diff"
 clipboard = true
 preview_context = 5
 cache_responses = true
-post_hooks = ["pytest -q"]
+post_hooks = ["bash tools/post_hooks.sh run"]
+
+[context]
+context_globs = ["src/**/*.py", "tests/**/*.py"]
+context_plan = true
+
+[tooling]
+require_ripgrep = true
+require_ctags = true
 
 [[routing_rules]]
 pattern = "*.ts"
@@ -117,7 +144,28 @@ Place an optional validator at `config/validate_diff.py` to veto or rewrite diff
 
 - `--diff-preview --preview-context 5` prints a small snippet prior to the full diff.  
 - `--clipboard` copies the diff to your system clipboard (macOS, Windows, Linux with `xclip`/`xsel`).  
-- `--post-hook "pytest -q"` runs a shell command after a successful apply; repeat the flag for multiple hooks.
+- Post-apply automation defaults to `bash tools/post_hooks.sh run`, which fans out to lint, type, test, security, and audit stages (skipping any tools you have not installed yet). Override with `--post-hook` or `post_hooks = [...]` in the TOML.
+
+## Quality Gates & Safety Nets
+
+- `make lint`, `make typecheck`, and `make hooks` are the fastest way to smoke-test a generated diff before committing.  
+- The Hypothesis property tests (`tests/test_hypothesis_diff.py`) and optional Atheris fuzz harness (`tests/fuzz_diff_apply.py`) keep diff parsing hardened; they run automatically in CI.  
+- Pre-commit hooks (`pre-commit install --install-hooks`) run Ruff, Black, Isort, and Bandit locally; invoke manual stages (`pre-commit run --hook-stage manual pytest`) for slower checks.  
+- CI now enforces formatting, static analysis, security scans, and dependency audits via `.github/workflows/ci.yml`.  
+- Prefer `nox -s lint typecheck tests security audit` for a hermetic, reproducible toolchain when you want to avoid polluting your main environment.
+
+## Security & Supply-Chain Scanning
+
+- `make security` runs Bandit and Semgrep (with a fallback to the community `auto` ruleset).  
+- `make audit` runs both `pip-audit` and `safety` so you catch Python advisories early.  
+- In CI the same scanners fail the build if an issue is found; locally you can allow them to warn by tweaking `tools/post_hooks.sh`.
+
+## Retrieval & Context Helpers
+
+- Set `context.context_plan = true` (default) so HybridAgent previews which files it will feed into the prompt.  
+- Install `ripgrep` (`rg`) and `universal-ctags` to unlock fast symbol search; toggle the `tooling.require_ripgrep` / `require_ctags` flags in `hybrid_agent.toml` to make them mandatory.  
+- Populate `context_globs` in `hybrid_agent.toml` to bias context collection toward high-signal directories (already seeded with `src`, `tests`, and `tools`).  
+- Pair this repo with local coder models such as `qwen2.5-coder`, `deepseek-coder`, or `starcoder2` in Ollama for a stronger ensemble before falling back to CodexCLI.
 
 ## Editor Helpers
 

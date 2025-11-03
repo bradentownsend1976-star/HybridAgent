@@ -19,7 +19,9 @@ class StripDiffTests(unittest.TestCase):
 ```
 """
         stripped = loop._strip_code_fences(original)
-        self.assertEqual(stripped, "--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-old\n+new")
+        self.assertEqual(
+            stripped, "--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-old\n+new"
+        )
 
     def test_looks_like_unified_diff_accepts_context_style(self) -> None:
         context_diff = textwrap.dedent(
@@ -59,13 +61,16 @@ class SolveRequestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             workspace = Path(td) / "ws"
             log_path = Path(td) / "run.jsonl"
-            with mock.patch(
-                "hybrid_agent.loop.ollama_generate_diff",
-                return_value=(False, "", "ollama down"),
-            ) as ollama_mock, mock.patch(
-                "hybrid_agent.loop.codex_generate_diff",
-                return_value=(True, diff_response, "codex ok"),
-            ) as codex_mock:
+            with (
+                mock.patch(
+                    "hybrid_agent.loop.ollama_generate_diff",
+                    return_value=(False, "", "ollama down"),
+                ) as ollama_mock,
+                mock.patch(
+                    "hybrid_agent.loop.codex_generate_diff",
+                    return_value=(True, diff_response, "codex ok"),
+                ) as codex_mock,
+            ):
                 result = loop.solve_request(
                     prompt="Change sample",
                     files=[],
@@ -78,7 +83,9 @@ class SolveRequestTests(unittest.TestCase):
 
                 self.assertEqual(result.returncode, 0)
                 self.assertEqual(result.source, "codex")
-                expected_diff = "--- a/sample.py\n+++ b/sample.py\n@@ -0,0 +1 @@\n+print('ok')"
+                expected_diff = (
+                    "--- a/sample.py\n+++ b/sample.py\n@@ -0,0 +1 @@\n+print('ok')"
+                )
                 self.assertEqual(result.diff_text.strip(), expected_diff)
                 self.assertTrue((workspace / "last.diff").exists())
                 archive_dir = workspace / "diffs"
@@ -116,12 +123,15 @@ sys.exit(1)
                 ),
                 encoding="utf-8",
             )
-            with mock.patch(
-                "hybrid_agent.loop.ollama_generate_diff",
-                return_value=(False, "", "ollama down"),
-            ), mock.patch(
-                "hybrid_agent.loop.codex_generate_diff",
-                return_value=(True, diff_response, "codex ok"),
+            with (
+                mock.patch(
+                    "hybrid_agent.loop.ollama_generate_diff",
+                    return_value=(False, "", "ollama down"),
+                ),
+                mock.patch(
+                    "hybrid_agent.loop.codex_generate_diff",
+                    return_value=(True, diff_response, "codex ok"),
+                ),
             ):
                 result = loop.solve_request(
                     prompt="Change app",
@@ -160,12 +170,15 @@ sys.stdout.write({rewritten_diff!r})
                 ),
                 encoding="utf-8",
             )
-            with mock.patch(
-                "hybrid_agent.loop.ollama_generate_diff",
-                return_value=(False, "", "ollama down"),
-            ), mock.patch(
-                "hybrid_agent.loop.codex_generate_diff",
-                return_value=(True, original_diff, "codex ok"),
+            with (
+                mock.patch(
+                    "hybrid_agent.loop.ollama_generate_diff",
+                    return_value=(False, "", "ollama down"),
+                ),
+                mock.patch(
+                    "hybrid_agent.loop.codex_generate_diff",
+                    return_value=(True, original_diff, "codex ok"),
+                ),
             ):
                 result = loop.solve_request(
                     prompt="Change app",
@@ -208,12 +221,15 @@ sys.stdout.write({rewritten_diff!r})
             cache_dir = Path(td) / "cache"
             cache_key = "cachekey123"
             cache_metadata = {"note": "unit-test"}
-            with mock.patch(
-                "hybrid_agent.loop.ollama_generate_diff",
-                return_value=(False, "", "ollama down"),
-            ), mock.patch(
-                "hybrid_agent.loop.codex_generate_diff",
-                return_value=(True, diff_response, "codex ok"),
+            with (
+                mock.patch(
+                    "hybrid_agent.loop.ollama_generate_diff",
+                    return_value=(False, "", "ollama down"),
+                ),
+                mock.patch(
+                    "hybrid_agent.loop.codex_generate_diff",
+                    return_value=(True, diff_response, "codex ok"),
+                ),
             ):
                 first = loop.solve_request(
                     prompt="Change data",
@@ -230,10 +246,13 @@ sys.stdout.write({rewritten_diff!r})
             self.assertTrue((cache_dir / f"{cache_key}.diff").exists())
 
             def fail(*_args, **_kwargs):
-                raise AssertionError("Backend should not have been invoked when cache is warm.")
+                raise AssertionError(
+                    "Backend should not have been invoked when cache is warm."
+                )
 
-            with mock.patch("hybrid_agent.loop.ollama_generate_diff", side_effect=fail), mock.patch(
-                "hybrid_agent.loop.codex_generate_diff", side_effect=fail
+            with (
+                mock.patch("hybrid_agent.loop.ollama_generate_diff", side_effect=fail),
+                mock.patch("hybrid_agent.loop.codex_generate_diff", side_effect=fail),
             ):
                 cached = loop.solve_request(
                     prompt="Change data",

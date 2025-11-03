@@ -7,3 +7,4 @@ workspace/
 .venv/
 .mypy_cache/
 .pytest_cache/
+.pre-commit-cache/

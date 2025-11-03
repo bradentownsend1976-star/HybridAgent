@@ -1,0 +1,7 @@
+{
+  "include": ["src", "tests"],
+  "ignore": ["tests/fuzz_diff_apply.py"],
+  "typeCheckingMode": "basic",
+  "reportAttributeAccessIssue": "warning",
+  "reportMissingImports": "warning"
+}

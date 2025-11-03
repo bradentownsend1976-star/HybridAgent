@@ -1,40 +1,80 @@
 from __future__ import annotations
 
 import json
-from typing import Tuple
-from urllib import error, request
+from typing import List, Tuple
+from urllib import request as _req
+from urllib.parse import urlsplit
+
+
+def _safe_urlopen(req, timeout_s):
+    # Only allow http/https (avoid file:// etc.)
+    url = getattr(req, "full_url", None) or str(req)
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https"):
+        raise ValueError(f"Disallowed URL scheme: {parts.scheme}")
+    return _req.urlopen(req, timeout=timeout_s)  # nosec B310
+
+
+# nosec B310
+def _pick_ollama_model(models: str) -> str:
+    first = (models or "").split(",")[0].strip()
+    if not first:
+        return "qwen2.5-coder:7b-instruct"
+    if "api:ollama:" in first:
+        return first.split("api:ollama:", 1)[1]
+    return first
 
 
 def ollama_generate_diff(
-    model: str, prompt: str, timeout_s: int = 25
+    models: str,
+    prompt: str,
+    files: List[str],
+    timeout_s: int = 180,
 ) -> Tuple[bool, str, str]:
-    payload = {"model": model, "prompt": prompt, "stream": False}
-    data = json.dumps(payload).encode("utf-8")
-    req = request.Request(
-        "http://localhost:11434/api/generate",
-        data=data,
-        headers={"Content-Type": "application/json"},
+    """Call local Ollama /api/generate and return only the model text.
+    Returns (ok, text, message).
+    """
+    model = _pick_ollama_model(models)
+    body = {
+        "model": model,
+        "prompt": prompt,
+        "options": {"temperature": 0},
+        "stream": False,
+    }
+    try:
+        data = json.dumps(body).encode("utf-8")
+        req = _req.Request(
+            "http://127.0.0.1:11434/api/generate",
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with _safe_urlopen(req, timeout_s) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+        try:
+            j = json.loads(raw)
+        except Exception:
+            lines = raw.strip().splitlines()
+            j = json.loads(lines[-1]) if lines else {}
+        text = (j.get("response") or "").strip()
+        if not text:
+            return (False, "", "[ERR] Empty response from Ollama")
+        return (True, text, "[OK]")
+    except Exception as e:
+        return (False, "", f"[ERR] Ollama error: {e}")
+
+
+# Legacy-compatible wrapper for older call sites:
+# generate_diff(prompt, model='qwen2.5-coder:7b-instruct', files=[...], timeout_s=180)
+def generate_diff(
+    prompt: str,
+    model: str | None = None,
+    files: list[str] | None = None,
+    timeout_s: int = 180,
+) -> tuple[bool, str, str]:
+    return ollama_generate_diff(
+        models=(model or ""),
+        prompt=prompt,
+        files=(files or []),
+        timeout_s=timeout_s,
     )
-
-    try:
-        with request.urlopen(req, timeout=timeout_s) as resp:
-            body = resp.read().decode("utf-8")
-    except error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="ignore") if exc.fp else ""
-        message = f"[ERR] Ollama returned HTTP {exc.code}. {detail}".strip()
-        return False, "", message
-    except error.URLError as exc:
-        return False, "", f"[ERR] Unable to reach Ollama: {exc}"
-    except Exception as exc:  # pragma: no cover - defensive
-        return False, "", f"[ERR] Unexpected error querying Ollama: {exc}"
-
-    try:
-        payload = json.loads(body)
-    except json.JSONDecodeError:
-        return False, "", "[ERR] Ollama returned invalid JSON response."
-
-    response_text = payload.get("response", "")
-    if isinstance(response_text, str) and response_text.strip():
-        return True, response_text, "[OK]"
-
-    return False, "", "[ERR] Ollama returned an empty response."

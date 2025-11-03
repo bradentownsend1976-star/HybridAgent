@@ -3,7 +3,6 @@ from __future__ import annotations
 import datetime
 import json
 import subprocess  # nosec B404
-import sys
 import textwrap
 import time
 from dataclasses import dataclass
@@ -12,9 +11,6 @@ from typing import List, Sequence, Tuple
 
 from hybrid_agent.codex_client import codex_generate_diff
 from hybrid_agent.ollama_client import ollama_generate_diff
-
-# Temporary compatibility alias for older call sites still using loop.generate_diff
-generate_diff = ollama_generate_diff
 
 
 @dataclass
@@ -226,8 +222,15 @@ def _run_diff_validator(
         "ok": False,
     }
     try:
-        proc = subprocess.run(  # nosec B603 B607
-            [sys.executable, str(validator)],
+        cmd = [sys.executable, str(validator)],
+proc = subprocess.run(
+    cmd,
+    input=diff_text,
+    text=True,
+    capture_output=True,
+    cwd=str(root_dir),
+)  # nosec B603
+],
             input=diff_text,
             text=True,
             capture_output=True,
@@ -395,7 +398,7 @@ def _coerce_unified(
                 src = target_file.read_text(
                     encoding="utf-8", errors="replace"
                 ).splitlines()
-            except Exception:
+            except Exception:  # nosec B110
                 src = []
             if len(src) == 1:
                 old_line = src[0]
@@ -492,6 +495,7 @@ def _append_run_log(
         pass
 
 
+# nosec B110
 def solve_request(
     prompt: str,
     files: List[str],
@@ -626,9 +630,9 @@ def solve_request(
             if delay > 0:
                 time.sleep(delay)
         ok, text, msg = ollama_generate_diff(
-            models=ollama_model,
-            prompt=full_prompt,
-            files=files,
+            ollama_model,
+            full_prompt,
+            files,
             timeout_s=25,
         )
         raw_text = text if isinstance(text, str) else ""

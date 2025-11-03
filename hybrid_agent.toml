@@ -17,3 +17,20 @@ timeout_s = 90
 [apply]
 preview = false                    # set true to validate without writing
 commit_message = "hybrid-agent apply"
+
+# Post-apply quality gates (see tools/post_hooks.sh for subcommands).
+post_hooks = [
+  "bash tools/post_hooks.sh run"
+]
+
+[context]
+context_plan = true
+context_globs = [
+  "src/**/*.py",
+  "tests/**/*.py",
+  "tools/**/*.sh",
+]
+
+[tooling]
+require_ripgrep = false            # toggle true to hard-require rg (install ripgrep)
+require_ctags = false              # toggle true to hard-require universal-ctags

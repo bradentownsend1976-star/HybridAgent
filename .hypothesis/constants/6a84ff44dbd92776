@@ -1,0 +1,4 @@
+# file: /mnt/c/Users/brade/OneDrive/Desktop/HybridAgent/src/hybrid_agent/ollama_client.py
+# hypothesis_version: 6.143.1
+
+[180, ',', 'Content-Type', 'POST', '[OK]', 'api:ollama:', 'application/json', 'full_url', 'http', 'https', 'model', 'options', 'prompt', 'replace', 'response', 'stream', 'temperature', 'utf-8']

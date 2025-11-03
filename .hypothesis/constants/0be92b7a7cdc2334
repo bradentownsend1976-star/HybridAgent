@@ -1,0 +1,4 @@
+# file: /mnt/c/Users/brade/OneDrive/Desktop/HybridAgent/src/hybrid_agent/codex_client.py
+# hypothesis_version: 6.143.1
+
+[180, '--file', '--models', '--prompt', '[OK]', 'codex-local']
