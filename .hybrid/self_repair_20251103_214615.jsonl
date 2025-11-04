@@ -1,0 +1,2 @@
+{"step": 1, "test_exit": 1, "test_ms": 12312.1, "result": "fail", "failure_digest": "08a1731c1459415e"}
+{"step": 1, "solver_rc": 2, "solver_ms": 2366.8, "solver_stdout_tail": "", "solver_stderr_tail": "[ERR] CodexCLI did not produce a recognizable diff format."}
