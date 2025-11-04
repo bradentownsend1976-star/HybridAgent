@@ -22,6 +22,19 @@ cat hello.py | bash scripts/ha.sh solve --stdin --stdin-label hello.py \
 Add `--apply-preview` to show `git apply --stat` before applying a diff.
 Use `--apply-mode ask` to review the diff interactively, or `--apply-mode never` to keep things read-only.
 
+## CLI Quickstart (`hybrid`)
+
+The Typer-based CLI wraps the legacy `ha` command with colorized output and friendlier help:
+
+```bash
+hybrid --help
+hybrid doctor
+hybrid plan --prompt "Return ONLY a diff that replaces the greeting." --file hello.py
+hybrid solve --prompt "Ship the diff." --file hello.py --apply
+```
+
+`hybrid plan` always includes `--context-plan`, so it produces the full system prompt and context without reaching out to Ollama or codex-local.
+
 `make` helpers:
 
 ```bash
@@ -49,6 +62,36 @@ Install the curated git hooks:
 pip install pre-commit
 pre-commit install --install-hooks
 ```
+
+## Environment Check & Dry Runs
+
+Make sure the local prerequisites are in place before you attempt a real solve:
+
+```bash
+hybrid doctor
+```
+
+The doctor command checks for `git`, `patch`, `ollama`, the `codex-local` CLI, and whether Ollama is listening on `http://127.0.0.1:11434/`. If anything is missing you will get a concise hint (with color) on how to fix it.
+
+You can compose the full system prompt and context without talking to any models by adding `--context-plan`:
+
+```bash
+hybrid plan --prompt "Return ONLY a diff that replaces the greeting." \
+  --file hello.py \
+  --max-ollama-attempts 0
+```
+
+Copy the `[PLAN]` output into the model of your choice if you want to drive the loop manually, or keep the flag off once Ollama/Codex are available.
+
+## One-Line Install (pipx)
+
+If you have [pipx](https://github.com/pypa/pipx) available, you can install the CLI from this repository with a single command:
+
+```bash
+pipx install --suffix hybridagent "$(pwd)"
+```
+
+Run the command from the repository root to publish `hybrid` and `ha` onto your PATH without touching the system Python. Replace `$(pwd)` with a Git URL if you have a remote.
 
 ## Prompt Guardrails
 
