@@ -1,6 +1,8 @@
 import typer
 from rich.console import Console
 
+from .plugins import discover as discover_plugins
+
 app = typer.Typer(
     add_completion=False,
     help="Friendly interface for HybridAgent's diff-generation tools.",
@@ -92,3 +94,32 @@ def main() -> None:  # console_scripts entrypoint expects this
     # Typer apps are callable; this invokes the CLI.
     # Returning None is fine; console script wraps SystemExit.
     app()
+
+
+exec_app = typer.Typer(help="Run executor plugins")
+app.add_typer(exec_app, name="exec")
+
+
+@exec_app.command("mouth-sync")
+def exec_mouth_sync(
+    audio: str = typer.Option(..., "--audio", help="Path to audio file (wav/mp3)"),
+    fps: int = typer.Option(30, "--fps", help="Output FPS for timeline"),
+    out: str = typer.Option("visemes.json", "--out", help="Output JSON file"),
+) -> None:
+    """
+    Run the mouth-sync executor (stub) and emit viseme JSON.
+    """
+    console = Console()
+    plugins = discover_plugins()
+    execs = plugins.get("executors", [])
+    cls = next((e for e in execs if getattr(e, "name", "") == "mouth-sync"), None)
+    if cls is None:
+        console.print(
+            "[red][ERR][/red] mouth-sync executor not found via plugin discovery."
+        )
+        raise SystemExit(2)
+    inst = cls()  # type: ignore[call-arg]
+    result = inst.run(audio=audio, fps=fps, out=out)
+    console.print(
+        f"[green][OK][/green] wrote {out} ({len(result.get('frames', []))} frames)"
+    )
