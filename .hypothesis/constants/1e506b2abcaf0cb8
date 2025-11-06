@@ -1,0 +1,4 @@
+# file: /mnt/c/Users/brade/OneDrive/Desktop/HybridAgent/src/hybrid_agent/plugins/loader.py
+# hypothesis_version: 6.143.1
+
+['executor', 'executors', 'generator', 'generators', 'validator', 'validators']

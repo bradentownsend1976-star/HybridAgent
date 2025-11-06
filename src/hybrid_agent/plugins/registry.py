@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-from .executors import mouth_sync_stub
+from .executors import mouth_sync_stub, episode_orchestrator
 
-_EXEC = {mouth_sync_stub.PLUGIN.id: mouth_sync_stub.PLUGIN}
+_EXEC = {mouth_sync_stub.PLUGIN.id: mouth_sync_stub.PLUGIN,
+         episode_orchestrator.PLUGIN.id: episode_orchestrator.PLUGIN}
 _VAL: Dict[str, object] = {}
 _GEN: Dict[str, object] = {}
 
