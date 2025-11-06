@@ -1,0 +1,4 @@
+# file: /mnt/c/Users/brade/OneDrive/Desktop/HybridAgent/src/hybrid_agent/plugins/registry.py
+# hypothesis_version: 6.143.1
+
+['.', 'PLUGIN', '__path__', 'executor', 'executors', 'generator', 'generators', 'hybrid_agent.plugins', 'id', 'kind', 'module', 'ref', 'validator', 'validators']

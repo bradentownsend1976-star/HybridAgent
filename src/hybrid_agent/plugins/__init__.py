@@ -1,3 +1,1 @@
-from .loader import discover as discover
-
-__all__ = ["discover"]
+from .loader import discover, get_plugins_by_kind

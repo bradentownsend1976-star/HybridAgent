@@ -1,0 +1,4 @@
+# file: /mnt/c/Users/brade/OneDrive/Desktop/HybridAgent/src/hybrid_agent/cli_app.py
+# hypothesis_version: 6.143.1
+
+[900.0, '--audio', '--file', '--fps', '--out', '--prompt', '--version', '0.0.0', 'Output JSON file', 'Run executor plugins', 'doctor', 'exec', 'executors', 'hybrid', 'hybridagent', 'mouth-sync', 'name', 'plan', 'pytest -q', 'self-repair', 'solve', 'src/', 'visemes.json']
